@@ -3,8 +3,7 @@
 updateGraph: replaces-mode
 reviewers:
   - vivekr-splunk
-  - smohan-splunk
-  - sgontla
-  - pdhanoyasplunk
-  - gaurav-splunk
-  - pogdin
+  - rlieberman-splunk
+  - kasiakoziol
+  - patrykw-splunk
+  - Igor-splunk

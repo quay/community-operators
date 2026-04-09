@@ -3,6 +3,15 @@
 updateGraph: replaces-mode
 
 reviewers:
+  - instana/eng-agent
+  - instanacd
+  - instana-agent-build
   - htreu
   - FelixMarxIBM
-  - tkohn
+  - Milica-Cvrkota-IBM
+  - vineethsoman03
+  - konrad-ohms
+  - Jefiya-MJ
+  - nagaraj-kandoor
+  - FredrikAtIBM
+  - rashmiswamyibm

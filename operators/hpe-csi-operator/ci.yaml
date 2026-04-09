@@ -4,4 +4,7 @@ updateGraph: replaces-mode
 
 # A list of reviewers to be added to pull requests (GitHub user name)
 reviewers:
-  - raunakkumar
+  - sijeesh
+  - dileepds
+  - datamattsson
+  - rohit-balakrishna

@@ -3,6 +3,3 @@ updateGraph: semver-mode
 reviewers:
  - ebaron
  - andrewazores
- - hareetd
- - jan-law
- - jiekang

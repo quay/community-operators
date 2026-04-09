@@ -14,30 +14,36 @@ env:
   OPP_SCRIPT_URL: "https://raw.githubusercontent.com/redhat-openshift-ecosystem/community-operators-pipeline/ci/latest/ci/scripts/opp.sh"
   OPP_SCRIPT_ENV_URL: "https://raw.githubusercontent.com/redhat-openshift-ecosystem/community-operators-pipeline/ci/latest/ci/scripts/opp-env.sh"
   OPP_SCRIPT_ENV_OPRT_URL: "https://raw.githubusercontent.com/redhat-openshift-ecosystem/community-operators-pipeline/ci/latest/ci/scripts/opp-oprt.sh"
+  OPP_SCRIPT_CLEANUP_URL: "https://raw.githubusercontent.com/redhat-openshift-ecosystem/community-operators-pipeline/ci/latest/ci/scripts/opp-disk-cleanup-on-startup.sh"
   OPP_IMAGE: "quay.io/operator_testing/operator-test-playbooks:latest"
   OPP_ANSIBLE_PULL_REPO: "https://github.com/redhat-openshift-ecosystem/operator-test-playbooks"
   OPP_ANSIBLE_PULL_BRANCH: "upstream-community"
   OPP_THIS_REPO_BASE: "https://github.com"
   OPP_THIS_REPO: "k8s-operatorhub/community-operators"
+  OPP_THIS_REPO_NAME: "community-operators"
+  OPP_THIS_REPO_ORG: "k8s-operatorhub"
   OPP_THIS_BRANCH: "main"
   OPP_RELEASE_BUNDLE_REGISTRY: "quay.io"
   OPP_RELEASE_BUNDLE_ORGANIZATION: "operatorhubio"
   OPP_RELEASE_INDEX_REGISTRY: "quay.io"
   OPP_RELEASE_INDEX_ORGANIZATION: "operatorhubio"
   OPP_RELEASE_INDEX_NAME: "catalog_tmp"
-  OPP_MIRROR_INDEX_MULTIARCH_BASE: "registry.redhat.io/openshift4/ose-operator-registry"
-  OPP_MULTIARCH_SUPPORTED_VERSIONS: "v4.9"
+  OPP_MIRROR_INDEX_MULTIARCH_BASE: "quay.io/operator-framework/opm"
+  OPP_MULTIARCH_SUPPORTED_VERSIONS: "v1.57.0"
   OPP_MIRROR_INDEX_MULTIARCH_POSTFIX: "s"
-  IIB_INPUT_REGISTRY_USER: "mavala"
+  IIB_INPUT_REGISTRY_USER: "framework_automation"
   OPP_PROD: 0
   OPP_DRY_RUN: 0
-  KIND_VERSION: "v0.14.0"
-  KIND_KUBE_VERSION: "v1.22.7"
+  # TODO handle config
+  OPP_PACKAGEMANIFEST_DISABLED: "1"
+  KIND_VERSION: "v0.30.0"
+  KIND_KUBE_VERSION_LATEST: "v1.32.8"
   OPP_PRODUCTION_TYPE: "k8s"
   OPP_REVIEWERS_ENABLED: 1
-  OPP_FORCE_DEPLOY_ON_K8S_OPENSHIFT_VERSION: 4.8
+  OPP_FORCE_DEPLOY_ON_K8S_OPENSHIFT_VERSION: 4.10
 #  ARTEFACT_PATH: "/tmp/operator-test" #hardcoded for now
 
+  IIB_INPUT_REGISTRY_TOKEN: ${{ secrets.IIB_INPUT_REGISTRY_TOKEN }}
 
 jobs:
   pr-check:
@@ -46,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: '3.x'
       - name: Install dependencies
@@ -64,10 +70,41 @@ jobs:
           echo "Using script '$OPP_SCRIPT_ENV_OPRT_URL' ..."
           echo "global labels $OPP_LABELS"
           bash <(curl -sL $OPP_SCRIPT_ENV_OPRT_URL)
+      - name: Operator traffic light (result)
+        id: op-traffic-light-result
+        if: always() && (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1' )
+        run: |
+          if [ -f /tmp/pr_rebase.txt ] ; then
+            echo "git_rebase_conflict=1" >> $GITHUB_OUTPUT
+            MARKER="===EOF-${RANDOM}==="
+            echo "git_rebase_conflict_comment<<${MARKER}" >> $GITHUB_OUTPUT
+            cat /tmp/pr_rebase.txt >> $GITHUB_OUTPUT
+            echo "${MARKER}" >> $GITHUB_OUTPUT
+          else
+            echo "git_rebase_conflict=0" >> $GITHUB_OUTPUT
+            echo "git_rebase_conflict_comment=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Operator traffic light (comment)
+        id: op-traffic-light-comment
+        if: always() && steps.op-traffic-light-result.outputs.git_rebase_conflict == '1'
+        uses: mshick/add-pr-comment@v1
+        with:
+          message: |
+            Dear @${{ github.event.pull_request.user.login }},
+            Your forked procject is not rebased
+            
+            To fix this issue please rebase or execute following commands: 
+            ```
+            ${{ steps.op-traffic-light-result.outputs.git_rebase_conflict_comment }}
+            ```
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token-user-login: 'github-actions[bot]' # The user.login for temporary GitHub tokens
+          allow-repeats: true
 
       - name: Operator info
         id: op-info
-        if: steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1'
+        if: (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1') && (steps.op-traffic-light.outputs.opp_ci_yaml_only == '0')
         env:
           OPP_LABELS: "${{ join(github.event.pull_request.labels.*.name, ' ') }}"
           OPP_PR_AUTHOR: "${{ github.event.pull_request.user.login }}"
@@ -78,25 +115,42 @@ jobs:
           OPP_AUTO_LABEL: "${{ steps.op-traffic-light.outputs.opp_auto_packagemanifest_cluster_version_label }}"
           ANSIBLE_FORCE_COLOR: 1
           ANSIBLE_DISPLAY_SKIPPED_HOSTS: 0
-          ANSIBLE_STDOUT_CALLBACK: "yaml"
+          ANSIBLE_CALLBACK_RESULT_FORMAT: "yaml"
         run: |
           # OPP_ANSIBLE_PULL_BRANCH="upstream-community-dev"
           [ "$OPP_AUTO_LABEL" = '1' ] && ANSIBLE_ARGS="-e automatic_cluster_version_label=true" || ANSIBLE_ARGS="-e automatic_cluster_version_label=false"
+          [ "$OPP_PACKAGEMANIFEST_DISABLED" = '1' ] && ANSIBLE_ARGS="-e manifest_format_disabled=true" || ANSIBLE_ARGS="$ANSIBLE_ARGS --e manifest_format_disabled=false"
 
 
           ansible-pull -U $OPP_ANSIBLE_PULL_REPO -C $OPP_ANSIBLE_PULL_BRANCH -i localhost, -e run_upstream=true -e run_prepare_catalog_repo_upstream=false -e run_remove_catalog_repo=false upstream/local.yml --tags reset_tools,operator_info -e operator_dir=$PWD/operators/operators/${{ steps.op-traffic-light.outputs.opp_name }} -e cluster_type=$OPP_PRODUCTION_TYPE -e strict_cluster_version_labels=true -e strict_k8s_bundles=true -e production_registry_namespace=$OPP_RELEASE_BUNDLE_REGISTRY/$OPP_RELEASE_BUNDLE_ORGANIZATION $ANSIBLE_ARGS
 
       - name: Operator info (result)
         id: op-info-result
-        if: always() && (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1' )
+        if: always() && (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1' ) && (steps.op-traffic-light.outputs.opp_ci_yaml_only == '0')
         run: |
-          echo "::set-output name=opp_check_err_k8s_bundles::0"
-          echo "::set-output name=opp_check_err_k8s_bundles_value::"
-          [ -f /tmp/operator-test/op_failed_k8s_bundles.yaml ] && echo "::set-output name=opp_check_err_k8s_bundles::1" || true
-          [ -f /tmp/operator-test/op_failed_k8s_bundles.yaml ] && echo "::set-output name=opp_check_err_k8s_bundles_value::$(cat /tmp/operator-test/op_failed_k8s_bundles.yaml | yq -r '.operators | @csv' | tr -d '"')" || true
+          echo "opp_check_err_k8s_bundles=0" >> $GITHUB_OUTPUT
+          echo "opp_check_err_k8s_bundles_value=" >> $GITHUB_OUTPUT
+          echo "opp_check_err_package_manifest=" >> $GITHUB_OUTPUT
+          [ -f /tmp/operator-test/op_failed_k8s_bundles.yaml ] && echo "opp_check_err_k8s_bundles=1" >> $GITHUB_OUTPUT || true
+          [ -f /tmp/operator-test/op_failed_k8s_bundles.yaml ] && echo "opp_check_err_k8s_bundles_value=$(cat /tmp/operator-test/op_failed_k8s_bundles.yaml | yq -r '.operators | @csv' | tr -d '"')" >> $GITHUB_OUTPUT || true
+          [ -f /tmp/operator-test/format_failed ] && echo "opp_check_err_package_manifest=1" >> $GITHUB_OUTPUT || true
+
+
+      - name: Operator info (packagemanifest format failed)
+        id: op-info-comment-format
+        if: always() && steps.op-info-result.outputs.opp_check_err_package_manifest == '1' && (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1' ) && (steps.op-traffic-light.outputs.opp_ci_yaml_only == '0')
+        uses: mshick/add-pr-comment@v1
+        with:
+          message: |
+            Dear @${{ github.event.pull_request.user.login }},
+            your operator is in package manifest format. This format is not supported anymore. Please convert it to bundle format. [More info](https://docs.openshift.com/container-platform/4.12/operators/operator_sdk/osdk-pkgman-to-bundle.html)
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token-user-login: 'github-actions[bot]' # The user.login for temporary GitHub tokens
+          allow-repeats: true
+
       - name: Operator info (comment)
         id: op-info-comment
-        if: always() && steps.op-info-result.outputs.opp_check_err_k8s_bundles == '1' && (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1' )
+        if: always() && steps.op-info-result.outputs.opp_check_err_k8s_bundles == '1' && (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1' ) && (steps.op-traffic-light.outputs.opp_ci_yaml_only == '0')
         uses: mshick/add-pr-comment@v1
         with:
           message: |
@@ -105,25 +159,25 @@ jobs:
             
             Affected versions : `${{ steps.op-info-result.outputs.opp_check_err_k8s_bundles_value }}`
             
-            More info in 'Kubernetes max version in CSV' section [here](https://redhat-openshift-ecosystem.github.io/community-operators-pipeline/operator-ci-yaml/#kubernetes-max-version-in-csv).
+            More info in 'Kubernetes max version in CSV' section [here](https://${{ env.OPP_THIS_REPO_ORG }}.github.io/${{ env.OPP_THIS_REPO_NAME }}/operator-ci-yaml/#kubernetes-max-version-in-csv).
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           repo-token-user-login: 'github-actions[bot]' # The user.login for temporary GitHub tokens
           allow-repeats: true
 
       - name: Upload operator_info
-        uses: actions/upload-artifact@v2
-        if: steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1' 
+        uses: actions/upload-artifact@v4
+        if: (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1') && (steps.op-traffic-light.outputs.opp_ci_yaml_only == '0')
         with:
           name: operator_info
           path: "/tmp/operator-test/op_info.yaml"
       - name: Upload converted operators
-        if: steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1' 
-        uses: actions/upload-artifact@v2
+        if: (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1') && (steps.op-traffic-light.outputs.opp_ci_yaml_only == '0')
+        uses: actions/upload-artifact@v4
         with:
           name: operators_converted
           path: "/tmp/operator-test/operators"
       - shell: bash
-        if: steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1' 
+        if: (steps.op-traffic-light.outputs.opp_op_delete == '0' || steps.op-traffic-light.outputs.opp_is_new_operatror == '1' || steps.op-traffic-light.outputs.opp_recreate == '1') && (steps.op-traffic-light.outputs.opp_ci_yaml_only == '0')
         run: |
           ls /tmp/operator-test/
           cat /tmp/operator-test/op_info.yaml
@@ -140,24 +194,25 @@ jobs:
       opp_is_new_operatror: "${{ steps.op-traffic-light.outputs.opp_is_new_operatror }}"
       opp_auto_packagemanifest_cluster_version_label: "${{ steps.op-traffic-light.outputs.opp_auto_packagemanifest_cluster_version_label }}"
       opp_installation_skipped: "${{ steps.op-traffic-light.outputs.opp_installation_skipped }}"
+      kind_kube_version: "${{ steps.op-traffic-light.outputs.kind_kube_version }}"
 
   test-kiwi:
     name: "kiwi / Full operator test"
     needs: pr-check
-    if: needs.pr-check.outputs.opp_test_ready == '1' && (needs.pr-check.outputs.opp_op_delete == '0' || needs.pr-check.outputs.opp_is_new_operatror == '1' || needs.pr-check.outputs.opp_recreate == '1' )
+    if: needs.pr-check.outputs.opp_test_ready == '1' && (needs.pr-check.outputs.opp_op_delete == '0' || needs.pr-check.outputs.opp_is_new_operatror == '1' || needs.pr-check.outputs.opp_recreate == '1' ) && needs.pr-check.outputs.opp_ci_yaml_only == '0'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Download operator_info
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: operator_info
           path: "/tmp/operator-test/"
       - name: Download converted operators
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: operators_converted
           path: "/tmp/operator-test/operators"
@@ -172,7 +227,9 @@ jobs:
           OPP_LABELS: "${{ join(github.event.pull_request.labels.*.name, ' ') }}"
           OPP_AUTO_PACKAGEMANIFEST_CLUSTER_VERSION_LABEL: "${{ needs.pr-check.outputs.opp_auto_packagemanifest_cluster_version_label }}"
           OPP_INSTALLATION_SKIP: "${{ needs.pr-check.outputs.opp_installation_skipped }}"
+          KIND_KUBE_VERSION: "${{ needs.pr-check.outputs.kind_kube_version }}"
         run: |
+          bash <(curl -sL $OPP_SCRIPT_CLEANUP_URL)
           echo "kiwi operators/${{ needs.pr-check.outputs.opp_name }}/${{ needs.pr-check.outputs.opp_version }}"
           bash <(curl -sL $OPP_SCRIPT_URL) kiwi "operators/${{ needs.pr-check.outputs.opp_name }}/${{ needs.pr-check.outputs.opp_version }}" || { RC=$?; echo $RC; true; }
           echo $RC
@@ -192,25 +249,23 @@ jobs:
         id: op-kiwi-test-err-bundle-validate
         if: always()
         run: |
-          echo "::set-output name=opp_check_err_bundle_validate::"
-          echo "::set-output name=operator_sdk_version::n/a"
-          echo "::set-output name=operator_sdk_args::n/a"
+          echo "operator_sdk_version=na" >> $GITHUB_OUTPUT
+          echo "operator_sdk_args=na" >> $GITHUB_OUTPUT
 
           OPP_BUNDLE_VALIDATE_FILE=/tmp/operator_sdk_bundle_validate_warnings_and_errors.txt
           if [ -f $OPP_BUNDLE_VALIDATE_FILE ] ;then
-            OPP_BUNDLE_VALIDATE_FILE_OUTPUT=$(cat $OPP_BUNDLE_VALIDATE_FILE)
-            echo $OPP_BUNDLE_VALIDATE_FILE_OUTPUT
-
-            OPP_BUNDLE_VALIDATE_FILE_OUTPUT="${OPP_BUNDLE_VALIDATE_FILE_OUTPUT//'%'/'%25'}"
-            OPP_BUNDLE_VALIDATE_FILE_OUTPUT="${OPP_BUNDLE_VALIDATE_FILE_OUTPUT//$'\n'/'%0A'}"
-            OPP_BUNDLE_VALIDATE_FILE_OUTPUT="${OPP_BUNDLE_VALIDATE_FILE_OUTPUT//$'\r'/'%0D'}"
-            echo "::set-output name=opp_check_err_bundle_validate::$OPP_BUNDLE_VALIDATE_FILE_OUTPUT"
+            delimiter="===EOF-${RANDOM}==="
+            echo "opp_check_err_bundle_validate<<${delimiter}" >> $GITHUB_OUTPUT
+            cat "$OPP_BUNDLE_VALIDATE_FILE" >> $GITHUB_OUTPUT
+            echo "${delimiter}" >> $GITHUB_OUTPUT
+          else
+            echo "opp_check_err_bundle_validate=" >> $GITHUB_OUTPUT
           fi
 
           OPP_BUNDLE_VALIDATE_INFO_FILE=/tmp/operator_sdk_bundle_validate_info.txt
           if [ -f $OPP_BUNDLE_VALIDATE_INFO_FILE ] ;then
-            echo "::set-output name=operator_sdk_version::$(sed '1q;d' $OPP_BUNDLE_VALIDATE_INFO_FILE)"
-            echo "::set-output name=operator_sdk_args::$(sed '2q;d' $OPP_BUNDLE_VALIDATE_INFO_FILE)"
+            echo "operator_sdk_version=$(sed '1q;d' $OPP_BUNDLE_VALIDATE_INFO_FILE)" >> $GITHUB_OUTPUT
+            echo "operator_sdk_args=$(sed '2q;d' $OPP_BUNDLE_VALIDATE_INFO_FILE)" >> $GITHUB_OUTPUT
           fi
 
       - name: "Comment operator_sdk_bundle_validate_warnings_and_errors if exists"
@@ -235,7 +290,7 @@ jobs:
         run: |
           ERR_LINES=$(cat /tmp/op-test/log.out | grep 'not specified olm.maxOpenShiftVersion' | wc -l)
           echo "opp_check_err_maxOpenShiftVersion=$ERR_LINES"
-          echo "::set-output name=opp_check_err_maxOpenShiftVersion::$ERR_LINES"
+          echo "opp_check_err_maxOpenShiftVersion=$ERR_LINES" >> $GITHUB_OUTPUT
 
       - name: "Comment operator test error olm.maxOpenShiftVersion"
         if: always() && steps.op-kiwi-test-err-maxOpenShiftVersion.outputs.opp_check_err_maxOpenShiftVersion != '0'
@@ -266,7 +321,7 @@ jobs:
   test-lemon:
     name: "lemon / Deploy from scratch"
     needs: pr-check
-    if: needs.pr-check.outputs.opp_test_ready == '1' && (needs.pr-check.outputs.opp_op_delete == '0' || needs.pr-check.outputs.opp_is_new_operatror == '1' || needs.pr-check.outputs.opp_recreate == '1')
+    if: needs.pr-check.outputs.opp_test_ready == '1' && (needs.pr-check.outputs.opp_op_delete == '0' || needs.pr-check.outputs.opp_is_new_operatror == '1' || needs.pr-check.outputs.opp_recreate == '1')  && needs.pr-check.outputs.opp_ci_yaml_only == '0'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -275,7 +330,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Operator test
@@ -283,7 +338,9 @@ jobs:
           OPP_LABELS: "${{ join(github.event.pull_request.labels.*.name, ' ') }}"
           OPP_AUTO_PACKAGEMANIFEST_CLUSTER_VERSION_LABEL: "${{ needs.pr-check.outputs.opp_auto_packagemanifest_cluster_version_label }}"
           OPERATOR_INDEX_TAG: ${{ matrix.index-tag }}
+          KIND_KUBE_VERSION: "${{ needs.pr-check.outputs.kind_kube_version }}"
         run: |
+          bash <(curl -sL $OPP_SCRIPT_CLEANUP_URL)
           echo "lemon_${OPERATOR_INDEX_TAG} operators/${{ needs.pr-check.outputs.opp_name }}/${{ needs.pr-check.outputs.opp_version }}"
           bash <(curl -sL $OPP_SCRIPT_URL) lemon_${OPERATOR_INDEX_TAG} "operators/${{ needs.pr-check.outputs.opp_name }}/${{ needs.pr-check.outputs.opp_version }}"
 
@@ -292,7 +349,7 @@ jobs:
   test-orange-latest:
     name: "orange / Deploy k8s"
     needs: pr-check
-    if: needs.pr-check.outputs.opp_test_ready == '1' && (needs.pr-check.outputs.opp_op_delete == '0' || needs.pr-check.outputs.opp_is_new_operatror == '1' || needs.pr-check.outputs.opp_recreate == '1' )
+    if: needs.pr-check.outputs.opp_test_ready == '1' && (needs.pr-check.outputs.opp_op_delete == '0' || needs.pr-check.outputs.opp_is_new_operatror == '1' || needs.pr-check.outputs.opp_recreate == '1' )  && needs.pr-check.outputs.opp_ci_yaml_only == '0'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -301,7 +358,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Operator test
@@ -309,11 +366,13 @@ jobs:
           OPP_LABELS: "${{ join(github.event.pull_request.labels.*.name, ' ') }}"
           OPP_AUTO_PACKAGEMANIFEST_CLUSTER_VERSION_LABEL: "${{ needs.pr-check.outputs.opp_auto_packagemanifest_cluster_version_label }}"
           OPP_MIRROR_INDEX_ENABLED: 1
-          OPP_IIB_INSTALL: 1
+          OPP_IIB_INSTALL: 0
           IIB_INPUT_REGISTRY_TOKEN: ${{ secrets.IIB_INPUT_REGISTRY_TOKEN }}
           OPERATOR_INDEX_TAG: ${{ matrix.index-tag }}
           OPP_INSTALLATION_SKIP: "${{ needs.pr-check.outputs.opp_installation_skipped }}"
+          KIND_KUBE_VERSION: "${{ needs.pr-check.outputs.kind_kube_version }}"
         run: |
+          bash <(curl -sL $OPP_SCRIPT_CLEANUP_URL)
           echo "orange_${OPERATOR_INDEX_TAG} operators/${{ needs.pr-check.outputs.opp_name }}/${{ needs.pr-check.outputs.opp_version }}"
           bash <(curl -sL $OPP_SCRIPT_URL) orange_${OPERATOR_INDEX_TAG} "operators/${{ needs.pr-check.outputs.opp_name }}/${{ needs.pr-check.outputs.opp_version }}"
 
@@ -335,7 +394,21 @@ jobs:
         run: |
           mkdir -p ./pr
           echo ${{ github.event.number }} > ./pr/NR
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v4
         with:
           name: pr
           path: pr/
+
+      - name: "Setting package-validated label"
+        if: needs.pr-check.outputs.opp_ci_yaml_only == '1'
+        uses: actions/github-script@v6
+        continue-on-error: true
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['package-validated']
+            })

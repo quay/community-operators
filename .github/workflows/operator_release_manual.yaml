@@ -19,9 +19,9 @@ on:
 
 
       index:
-        description: 'Target index (e.g. latest or latest-db)'
+        description: 'Target index (as a JSON list, e.g. ["latest", "latest-db"])'
         required: true
-        default: 'latest'
+        default: '["latest"]'
 
       list_of_operators:
         description: 'List of operators to be synced in the index, list has to be devided by spaces (e.g. aqua ripsaw)'
@@ -52,11 +52,11 @@ env:
   OPP_MIRROR_INDEX_ORGANIZATION: "operatorhubio"
   OPP_MIRROR_INDEX_NAME: "catalog"
   OPP_MIRROR_INDEX_ENABLED: "1"
-  OPP_MIRROR_INDEX_MULTIARCH_BASE: "registry.redhat.io/openshift4/ose-operator-registry"
-  OPP_MULTIARCH_SUPPORTED_VERSIONS: "v4.9"
+  OPP_MIRROR_INDEX_MULTIARCH_BASE: "quay.io/operator-framework/opm"
+  OPP_MULTIARCH_SUPPORTED_VERSIONS: "v1.57.0"
   OPP_MIRROR_INDEX_MULTIARCH_POSTFIX: "s"
-  IIB_INPUT_REGISTRY_USER: "mavala"
-  OPP_REGISTRY_MIRROR_USER: "mavala"
+  IIB_INPUT_REGISTRY_USER: "framework_automation"
+  OPP_REGISTRY_MIRROR_USER: "framework_automation"
   OPP_THIS_REPO_BASE: "https://github.com"
   OPP_THIS_REPO: "k8s-operatorhub/community-operators"
   OPP_THIS_BRANCH: "main"
@@ -75,6 +75,7 @@ env:
   QUAY_APPREG_TOKEN: ${{ secrets.QUAY_APPREG_TOKEN }}
   QUAY_COURIER_TOKEN: ${{ secrets.QUAY_COURIER_TOKEN }}
   REPO_GHA_PAT: ${{ secrets.REPO_GHA_PAT }}
+  IIB_INPUT_REGISTRY_TOKEN: ${{ secrets.IIB_INPUT_REGISTRY_TOKEN }}
 
 jobs:
   pr-check:
@@ -82,16 +83,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - id: files
-        uses: jitterbit/get-changed-files@v1
+        uses: masesgroup/retrieve-changed-files@v2
         continue-on-error: true
-      - id: prinfo
-        uses: actions-ecosystem/action-get-merged-pull-request@v1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: '3.x'
       - name: Install dependencies
@@ -103,10 +101,27 @@ jobs:
           OPP_MODIFIED_FILES: "${{ steps.files.outputs.modified }}"
           OPP_RENAMED_FILES: "${{ steps.files.outputs.renamed }}"
           OPP_REMOVED_FILES: "${{ steps.files.outputs.removed }}"
-          OPP_LABELS: "${{ steps.prinfo.outputs.labels }}"
+
         run: |
-          echo "PR : ${{ steps.prinfo.outputs.number }}"
-          echo "labels : ${{ steps.prinfo.outputs.labels }}"
+          if [ -z "${{ github.event.inputs.list_of_operators }}" ]
+          then
+                echo "Found an empty input - list_of_operators     [OK]"
+          else
+                OPP_MODIFIED_FILES=""
+                for operator_to_loop in ${{ github.event.inputs.list_of_operators }}; do
+                  echo "Processing $operator_to_loop"
+                  if [ -z "$OPP_MODIFIED_FILES" ]
+                  then 
+                    echo "...inicializing OPP_MODIFIED_FILES"
+                    OPP_MODIFIED_FILES="$(find operators/$operator_to_loop/ -type f -name "*.clusterserviceversion.yaml" | tail -n 1)"
+                  else
+                    echo "...extending OPP_MODIFIED_FILES"
+                    OPP_MODIFIED_FILES="$OPP_MODIFIED_FILES $(find operators/$operator_to_loop/ -type f -name "*.clusterserviceversion.yaml" | tail -n 1)"
+                  fi
+                done
+          fi
+          echo "OPP_MODIFIED_FILES=$OPP_MODIFIED_FILES"
+
           echo "OPP_LABELS=$OPP_LABELS"
           echo "Using script '$OPP_SCRIPT_ENV_URL' ..."
           bash <(curl -sL $OPP_SCRIPT_ENV_URL)
@@ -116,7 +131,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
-      opp_labels: "${{ steps.prinfo.outputs.labels }}"
+
       opp_test_ready: "${{ steps.op-traffic-light.outputs.opp_test_ready }}"
       opp_release_ready: "${{ steps.op-traffic-light.outputs.opp_release_ready }}"
       opp_stream: "${{ steps.op-traffic-light.outputs.opp_stream }}"
@@ -139,7 +154,7 @@ jobs:
     strategy:
       matrix:
 
-        index-tag: ['${{ github.event.inputs.index }}']
+        index-tag: ${{ fromJson(github.event.inputs.index) }}
 
       fail-fast: false
     steps:
@@ -170,7 +185,6 @@ jobs:
           echo "OPP_LABELS=$OPP_LABELS"
           FAKE_RC=false
           FAKE_TYPE=$(echo $OPERATOR_INDEX_TAG | cut -d '-' -f 2)
-          [[ $FAKE_TYPE == *rc* ]] && FAKE_RC=true || true
 
           echo "op_delete_${OPERATOR_INDEX_TAG} operators/${{ needs.pr-check.outputs.opp_name }}/${{ needs.pr-check.outputs.opp_version }} $OPP_THIS_REPO $OPP_THIS_BRANCH"
           bash <(curl -sL $OPP_SCRIPT_URL) op_delete_${OPERATOR_INDEX_TAG} operators/${{ needs.pr-check.outputs.opp_name }}/${{ needs.pr-check.outputs.opp_version }} $OPP_THIS_REPO $OPP_THIS_BRANCH || $FAKE_RC
@@ -194,11 +208,13 @@ jobs:
           OPP_INDEX_CHECK_ONLY: 1
         run: |
  
-          TARGET_INDEX_RAW=${{ github.event.inputs.index }}
-          TARGET_INDEX_RAW=$(echo $TARGET_INDEX_RAW|cut -d '-' -f1)
-          TARGET_INDEX_UNDERLINE=$(echo $TARGET_INDEX_RAW|tr '.' '_') 
-          echo "::set-output name=opp_uncomplete_operators::${{ github.event.inputs.list_of_operators }}"
-          echo "::set-output name=opp_uncomplete_operators_$TARGET_INDEX_UNDERLINE::${{ github.event.inputs.list_of_operators }}"
+          for index in $(echo '${{ github.event.inputs.index }}' | jq -r .[]); do
+              TARGET_INDEX_RAW=$(echo $index|cut -d '-' -f1)
+              TARGET_INDEX_UNDERLINE=$(echo $TARGET_INDEX_RAW|tr '.' '_')
+              export OPP_FORCE_OPERATORS_$TARGET_INDEX_UNDERLINE="${{ github.event.inputs.list_of_operators }}"
+              echo "opp_uncomplete_operators_$TARGET_INDEX_UNDERLINE=${{ github.event.inputs.list_of_operators }}" >> $GITHUB_OUTPUT
+          done
+          echo "opp_uncomplete_operators=${{ github.event.inputs.list_of_operators }}" >> $GITHUB_OUTPUT 
 
       - name: Index check
         run: |
@@ -210,29 +226,38 @@ jobs:
         env:
 
           OPP_FORCE_OPERATORS: "${{ github.event.inputs.list_of_operators }}"
+          OPP_OP_INFO_PARALLEL: 1
+          OPP_OP_INFO_PARALLEL_BATCH: 20
 
           OPP_AUTO_LABEL: 1
           ANSIBLE_FORCE_COLOR: 1
           ANSIBLE_DISPLAY_SKIPPED_HOSTS: 0
-          ANSIBLE_STDOUT_CALLBACK: "yaml"
+          ANSIBLE_CALLBACK_RESULT_FORMAT: "yaml"
+          TMPDIR: "/mnt/tmp"
         run: |
+          sudo mkdir -p "${TMPDIR}"
+          sudo chmod 1777 "${TMPDIR}"
           OPP_FORCE_OPERATORS=${OPP_FORCE_OPERATORS// /,}
           echo $OPP_FORCE_OPERATORS
           [ "$OPP_AUTO_LABEL" = '1' ] && ANSIBLE_ARGS="-e automatic_cluster_version_label=true" || ANSIBLE_ARGS="-e automatic_cluster_version_label=false"
-          ansible-pull -U $OPP_ANSIBLE_PULL_REPO -C $OPP_ANSIBLE_PULL_BRANCH -i localhost, -e run_upstream=true -e run_prepare_catalog_repo_upstream=true -e catalog_repo=$OPP_THIS_REPO_BASE/$OPP_THIS_REPO -e catalog_repo_branch=$OPP_THIS_BRANCH upstream/local.yml --tags reset_tools,operator_info -e operator_base_dir=/tmp/community-operators-for-catalog/operators -e operators=$OPP_FORCE_OPERATORS -e cluster_type=$OPP_PRODUCTION_TYPE -e strict_cluster_version_labels=true -e production_registry_namespace=$OPP_RELEASE_BUNDLE_REGISTRY/$OPP_RELEASE_BUNDLE_ORGANIZATION $ANSIBLE_ARGS
+          [ "$OPP_OP_INFO_PARALLEL" = '1' ] && ANSIBLE_ARGS="$ANSIBLE_ARGS -e op_info_parallel=true -e op_info_parallel_batch=$OPP_OP_INFO_PARALLEL_BATCH" || ANSIBLE_ARGS="$ANSIBLE_ARGS -e op_info_parallel=false"
+          echo $ANSIBLE_ARGS
+          git clone $OPP_ANSIBLE_PULL_REPO -b $OPP_ANSIBLE_PULL_BRANCH operator-test-playbooks
+          cd operator-test-playbooks
+          ansible-playbook -i localhost, -e ansible_connection=local -e run_upstream=true -e run_prepare_catalog_repo_upstream=true -e catalog_repo=$OPP_THIS_REPO_BASE/$OPP_THIS_REPO -e catalog_repo_branch=$OPP_THIS_BRANCH upstream/local.yml --tags reset_tools,operator_info -e operator_base_dir=/tmp/community-operators-for-catalog/operators -e operators=$OPP_FORCE_OPERATORS -e cluster_type=$OPP_PRODUCTION_TYPE -e strict_cluster_version_labels=true -e production_registry_namespace=$OPP_RELEASE_BUNDLE_REGISTRY/$OPP_RELEASE_BUNDLE_ORGANIZATION $ANSIBLE_ARGS
       - name: Upload operator_info
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: operator_info
           path: "/tmp/operator-test/op_info.yaml"
       - name: Upload converted operators
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: operators_converted
           path: "/tmp/operator-test/operators"
       - shell: bash
         run: |
-          [ -f /tmp/operator-test/op_info.yaml ] && cat /tmp/operator-test/op_info.yaml || echo "::set-output name=opp_uncomplete_operators::"          
+          [ -f /tmp/operator-test/op_info.yaml ] && cat /tmp/operator-test/op_info.yaml || echo "opp_uncomplete_operators=" >> $GITHUB_OUTPUT         
     outputs:
       opp_uncomplete_operators: "${{ steps.operators.outputs.opp_uncomplete_operators }}"
       opp_uncomplete_operators_latest: "${{ steps.operators.outputs.opp_uncomplete_operators_latest }}"
@@ -244,12 +269,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download operator_info
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: operator_info
           path: /tmp/operator-test/
       - name: Download converted operators
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: operators_converted
           path: /tmp/operator-test/operators
@@ -260,6 +285,7 @@ jobs:
           OPP_IIB_INSTALL: 0
           OPERATOR_INDEX_TAG: latest
           OPP_SKIP_INDEX: 1
+          OPP_SKIP_BUNDLES: 0
           OPP_FORCE_OPERATORS: "${{ needs.operators-k8s.outputs.opp_uncomplete_operators }}"
 
         run: |
@@ -267,7 +293,7 @@ jobs:
           echo "OPP_FORCE_OPERATORS=$OPP_FORCE_OPERATORS"
           FAKE_RC=false
           FAKE_TYPE=$(echo $OPERATOR_INDEX_TAG | cut -d '-' -f 2)
-          [[ $FAKE_TYPE == *rc* ]] && FAKE_RC=true || true
+
           echo "orange_${OPERATOR_INDEX_TAG} operators/sync $OPP_THIS_REPO $OPP_THIS_BRANCH"
           bash <(curl -sL $OPP_SCRIPT_URL) orange_${OPERATOR_INDEX_TAG} operators/sync $OPP_THIS_REPO $OPP_THIS_BRANCH || $FAKE_RC
 
@@ -280,27 +306,34 @@ jobs:
     strategy:
       matrix:
 
-        index-tag: ['${{ github.event.inputs.index }}']
+        index-tag: ${{ fromJson(github.event.inputs.index) }}
 
       fail-fast: false
     steps:
       - name: Download operator_info
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: operator_info
           path: /tmp/operator-test/
       - name: Download converted operators
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: operators_converted
           path: /tmp/operator-test/operators
+      - name: Print space info (before)
+        run: |
+          du -h -d 3 /tmp | sort  -h -r
+          df -h
+          docker images
+
       - name: Index sync
         env:
           OPP_LABELS: "${{ needs.pr-check.outputs.opp_labels }}"
           OPP_AUTO_PACKAGEMANIFEST_CLUSTER_VERSION_LABEL: "${{ needs.pr-check.outputs.opp_auto_packagemanifest_cluster_version_label }}"
-          OPP_IIB_INSTALL: 1
+          OPP_IIB_INSTALL: 0
           #OPP_MIRROR_INDEX_ENABLED: 0
           OPP_FORCE_INDEX_UPDATE: 1
+          OPP_SKIP_BUNDLES: 1
           IIB_INPUT_REGISTRY_TOKEN: ${{ secrets.IIB_INPUT_REGISTRY_TOKEN }}
           OPERATOR_INDEX_TAG: ${{ matrix.index-tag }}
           # OPP_FORCE_OPERATORS: "${{ needs.operators-k8s.outputs.opp_uncomplete_operators }}"
@@ -310,15 +343,57 @@ jobs:
           echo "OPP_LABELS=$OPP_LABELS"
           FAKE_RC=false
           FAKE_TYPE=$(echo $OPERATOR_INDEX_TAG | cut -d '-' -f 2)
-          [[ $FAKE_TYPE == *rc* ]] && FAKE_RC=true || true
 
-          TARGET_INDEX_RAW=${{ github.event.inputs.index }}
-          TARGET_INDEX_RAW=$(echo $TARGET_INDEX_RAW|cut -d '-' -f1)
-          TARGET_INDEX_UNDERLINE=$(echo $TARGET_INDEX_RAW|tr '.' '_') 
-          export OPP_FORCE_OPERATORS_$TARGET_INDEX_UNDERLINE="${{ github.event.inputs.list_of_operators }}"
 
+          for index in $(echo '${{ github.event.inputs.index }}' | jq -r .[]); do
+              TARGET_INDEX_RAW=$(echo $index|cut -d '-' -f1)
+              TARGET_INDEX_UNDERLINE=$(echo $TARGET_INDEX_RAW|tr '.' '_')
+              export OPP_FORCE_OPERATORS_$TARGET_INDEX_UNDERLINE="${{ github.event.inputs.list_of_operators }}"
+          done
+
+          bash <(curl -sL $OPP_SCRIPT_CLEANUP_URL)
           echo "orange_${OPERATOR_INDEX_TAG} operators/sync $OPP_THIS_REPO $OPP_THIS_BRANCH"
           bash <(curl -sL $OPP_SCRIPT_URL) orange_${OPERATOR_INDEX_TAG} operators/sync $OPP_THIS_REPO $OPP_THIS_BRANCH || $FAKE_RC
+      - name: Print space info (after)
+        if: always()
+        run: |
+          docker exec -t op-test /bin/bash -c "du -h -d 3 /tmp | sort  -h -r" || true
+          docker exec -t op-test /bin/bash -c "podman images ; df -h" || true
+          echo "local df:"
+          df -h
+  index-verify-k8s:
+    name: "Index Verify / k8s"
+    needs: [ pr-check, operators-k8s, bundles-k8s, release-k8s]
+    if: needs.pr-check.outputs.opp_release_ready == '1' && needs.operators-k8s.outputs.opp_uncomplete_operators != ''
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+
+        index-tag: ${{ fromJson(github.event.inputs.index) }}
+
+      fail-fast: false
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip yq
+      - name: Index verify
+        id: index-verify
+        env:
+          OPP_CONTAINER_TOOL: podman
+        run: |
+          MY_TAG=${{ matrix.index-tag }}
+          MY_TAG=$(echo $MY_TAG | cut -d '-' -f 1)
+          MY_INDEXES="quay.io/operatorhubio/catalog_tmp:${MY_TAG}"
+          MY_INDEXES="$MY_INDEXES,quay.io/operatorhubio/catalog_tmp:${MY_TAG}s"
+          MY_INDEXES="$MY_INDEXES,quay.io/operatorhubio/catalog:${MY_TAG}"
+
+          echo "MY_INDEXES=$MY_INDEXES"
+          echo "$REGISTRY_MIRROR_PW" | $OPP_CONTAINER_TOOL login $OPP_MIRROR_INDEX_REGISTRY -u $OPP_REGISTRY_MIRROR_USER --password-stdin || { echo "Problem to login to '$OPP_MIRROR_INDEX_REGISTRY' !!!"; exit 1; }
+          ansible-pull -U $OPP_ANSIBLE_PULL_REPO -C $OPP_ANSIBLE_PULL_BRANCH -i localhost, -e run_upstream=true -e run_prepare_catalog_repo_upstream=false -e container_tool=$OPP_CONTAINER_TOOL upstream/local.yml --tags reset_tools,index_verify  -e iv_indexes="$MY_INDEXES"
 
 
   ohio-image-k8s:
@@ -330,9 +405,12 @@ jobs:
     env:
       OHIO_INPUT_CATALOG_IMAGE: "quay.io/operatorhubio/catalog_tmp:latest"
       OHIO_REGISTRY_IMAGE: "quay.io/operator-framework/upstream-community-operators:latest"
+      TMPDIR: "/mnt/tmp"
 
     steps:
       - name: Ohio image
+        env:
+          TMPDIR: "/mnt/tmp"
         run: |
           echo "ohio_image operators/sync $OPP_THIS_REPO $OPP_THIS_BRANCH"
           bash <(curl -sL $OPP_SCRIPT_CLEANUP_URL)
@@ -353,21 +431,23 @@ jobs:
           bash <(curl -sL $OPP_SCRIPT_TRIGGER_OHIO_URL) ${CI_OHIO_BRANCH}
 
   slack-notification:
-    name: "Slack notification"
-    needs: [ pr-check, remove-k8s, operators-k8s, release-k8s, ohio-image-k8s, ohio-page-k8s ]
+    name: "Monitoring notification"
+    needs: [ pr-check, remove-k8s, operators-k8s, release-k8s, index-verify-k8s, ohio-image-k8s, ohio-page-k8s ]
 
 
     if: failure()
     runs-on: ubuntu-latest
     steps:
-      - name: Report Status
+      - name: Report Status to a Slack
         uses: ravsamhq/notify-slack-action@master
         with:
           notification_title: 'Release pipeline failed: ${{ needs.pr-check.outputs.opp_pr_title }}'
+          token: ${{ secrets.GITHUB_TOKEN }}
+          message_format: "{emoji} *{workflow}* {status_message} in <{repo_url}|{repo}>. <{run_url}|View Failed Run>"
           footer: 'monitoring'
-#          status: ${{ needs.pr-check.result }}
           status: 'failure'
           notify_when: 'failure'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.ACTION_MONITORING_SLACK }}
         continue-on-error: true
+

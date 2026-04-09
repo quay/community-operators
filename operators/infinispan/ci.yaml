@@ -4,3 +4,6 @@ updateGraph: replaces-mode
 reviewers:
   - rigazilla
   - ryanemerson
+  - infinispan-qe-bot
+  - pminz
+  - crumby

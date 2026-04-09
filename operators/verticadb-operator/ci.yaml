@@ -1,3 +1,6 @@
 updateGraph: semver-mode
 reviewers:
-  - spilchen
+  - roypaulin
+  - cchen-vertica
+  - qindotguan
+  - LiboYu2

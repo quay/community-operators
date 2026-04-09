@@ -17,19 +17,20 @@ production:
   mirror:
     enabled: 1
     multiarch:
-      base: registry.redhat.io/openshift4/ose-operator-registry
+      base: quay.io/operator-framework/opm
       base_tags:
-        - v4.9
+        - v1.57.0
       postfix: s
     registry: quay.io
     organization: operatorhubio
     name: catalog
     username:
-      in: mavala
-      out: mavala
+      in: framework_automation
+      out: framework_automation
   test:
     installation_skip:
       - ack-
+      - otc-rds-operator
 
 pipeline:
   base: https://github.com
@@ -40,13 +41,16 @@ pipeline:
   playbooks:
     repo: https://github.com/redhat-openshift-ecosystem/operator-test-playbooks
     branch: "upstream-community"
+  assignees:
+    - mporrato
+    - Allda
   automerge:
     enabled: 1
   reviewers:
     enabled: 1
   notifications:
     slack: 1
-
+  package_manifest_disabled: 1
 operatorhubio:
   enabled: 1
   registry: quay.io
@@ -59,7 +63,6 @@ operatorhubio:
 #  project: operator-test-playbooks
 #  tag: master
 tools:
-  kind_version: v0.14.0
-  #kind_kube_version: v1.21.10
-  kind_kube_version: v1.22.7
-  operator_sdk_version: v1.8.0
+  kind_version: v0.30.0
+  kind_kube_version: v1.32.8
+  operator_sdk_version: v1.36.0
